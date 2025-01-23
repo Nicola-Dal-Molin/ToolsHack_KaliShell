@@ -4,8 +4,14 @@ from scapy.all import ARP, Ether, srp
 import socket
 import subprocess
 import re
+import sys
 
-# Funzione per ottenere la rete dalla scheda attiva
+# Controllo permessi di root
+def check_root():
+    if subprocess.getoutput("id -u") != "0":
+        sys.exit("[ERRORE] Esegui questo script con privilegi di root (sudo).")
+
+# Ottenere la rete attiva
 def get_network():
     try:
         result = subprocess.check_output(["ip", "route"], text=True)
@@ -16,48 +22,42 @@ def get_network():
             ip_match = re.search(r"inet (\d+\.\d+\.\d+\.\d+/\d+)", ip_result)
             if ip_match:
                 return ip_match.group(1)
-        print("[Errore] Nessuna rete attiva rilevata.")
-    except Exception as e:
-        print(f"[Errore] Impossibile ottenere la rete: {e}")
+        print("[ERRORE] Nessuna rete attiva rilevata.")
+    except subprocess.CalledProcessError:
+        print("[ERRORE] Impossibile ottenere la rete. Verifica la connessione.")
     return None
 
-# Funzione per trovare gli host attivi nella rete
+# Scansione della rete con ARP
 def scan_network(ip_range):
-    print(f"Scanning network: {ip_range}")
+    print(f"[+] Scansione in corso sulla rete: {ip_range}")
     arp_request = ARP(pdst=ip_range)
     broadcast = Ether(dst="ff:ff:ff:ff:ff:ff")
     packet = broadcast / arp_request
 
-    answered = srp(packet, timeout=2, verbose=0)[0]
-    active_hosts = []
+    try:
+        answered = srp(packet, timeout=1, verbose=0)[0]
+        active_hosts = [{'ip': received.psrc, 'mac': received.hwsrc} for sent, received in answered]
+        return active_hosts
+    except Exception as e:
+        print(f"[ERRORE] Scansione ARP fallita: {e}")
+        return []
 
-    for sent, received in answered:
-        active_hosts.append({'ip': received.psrc, 'mac': received.hwsrc})
-
-    return active_hosts
-
-# Funzione per ottenere il banner del servizio da una porta
+# Ottenere il banner del servizio da una porta
 def get_service_banner(host, port):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(2)
             s.connect((host, port))
-            # Se la porta è HTTP (80 o 443), invia una richiesta HTTP minima
-            if port == 80 or port == 443:
+            if port in [80, 443]:
                 s.send(b"HEAD / HTTP/1.0\r\n\r\n")
                 banner = s.recv(1024).decode('utf-8', errors='ignore')
-                # Cerca nell'header 'Server' per ottenere il nome del servizio
-                if 'Server' in banner:
-                    server_line = [line for line in banner.split('\r\n') if line.startswith('Server')]
-                    if server_line:
-                        return server_line[0].split(":")[1].strip()
-                return "HTTP Server (unknown)"
-            else:
-                return "Service Banner not detected"
+                server_line = [line for line in banner.split("\r\n") if "Server" in line]
+                return server_line[0].split(": ")[1].strip() if server_line else "HTTP Server (unknown)"
+            return "Unknown Service"
     except Exception:
         return None
 
-# Funzione per controllare le porte aperte su un host e associare i servizi
+# Scansione porte sugli host
 def scan_ports(host, port_queue, open_ports):
     while not port_queue.empty():
         port = port_queue.get()
@@ -65,68 +65,66 @@ def scan_ports(host, port_queue, open_ports):
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(1)
                 result = s.connect_ex((host, port))
-                if result == 0:  # Porta aperta
-                    # Proviamo a ottenere il banner del servizio
-                    service_banner = get_service_banner(host, port)
-                    if service_banner:
-                        open_ports.append((port, service_banner))
-        except Exception as e:
+                if result == 0:
+                    banner = get_service_banner(host, port)
+                    open_ports.append((port, banner or "Unknown Service"))
+        except Exception:
             pass
         finally:
             port_queue.task_done()
 
-# Funzione principale per la scansione
+# Funzione principale
 def main(port_range, num_threads):
-    # Step 1: Ottenere la rete attiva
+    # Controlla i permessi di root
+    check_root()
+    
+    # Ottieni la rete attiva
     ip_range = get_network()
     if not ip_range:
-        print("Nessuna rete rilevata. Uscita.")
+        print("[ERRORE] Nessuna rete rilevata. Uscita.")
         return
 
-    # Step 2: Scansione degli host attivi nella rete
+    # Scansione degli host attivi
     hosts = scan_network(ip_range)
     if not hosts:
-        print("No active hosts found in the network.")
+        print("[INFO] Nessun host attivo trovato sulla rete.")
         return
 
-    print("\nActive hosts:")
+    print("\n[+] Host attivi rilevati:")
+    print("-------------------------------------------------")
     for host in hosts:
-        print(f"IP: {host['ip']}, MAC: {host['mac']}")
+        print(f"IP: {host['ip']} \t MAC: {host['mac']}")
+    print("-------------------------------------------------")
 
-    # Step 3: Scansione delle porte sugli host attivi
-    print("\nScanning ports on active hosts...")
+    # Scansione delle porte per ogni host attivo
+    print("\n[+] Inizio scansione delle porte sugli host attivi...")
     for host in hosts:
-        print(f"\nScanning {host['ip']}...")
+        print(f"\n[ Scansione su {host['ip']} ]")
         port_queue = queue.Queue()
         open_ports = []
 
-        # Riempire la coda con le porte da controllare
         for port in range(port_range[0], port_range[1] + 1):
             port_queue.put(port)
 
-        # Creare i thread per la scansione
         threads = []
         for _ in range(num_threads):
             thread = threading.Thread(target=scan_ports, args=(host['ip'], port_queue, open_ports))
             thread.start()
             threads.append(thread)
 
-        # Aspettare che tutti i thread finiscano
         for thread in threads:
             thread.join()
 
-        # Risultati
         if open_ports:
-            print(f"Open ports on {host['ip']}:")
+            print(f"[+] Porte aperte su {host['ip']}:")
             for port, service in open_ports:
-                print(f"  Port {port} - Service: {service}")
+                print(f"  Porta {port} - Servizio: {service}")
         else:
-            print(f"No open ports found on {host['ip']}.")
+            print(f"[-] Nessuna porta aperta rilevata su {host['ip']}.")
 
 if __name__ == "__main__":
     import argparse
 
-    # Parser degli argomenti CLI
     parser = argparse.ArgumentParser(description="Scansione di rete e porte.")
     parser.add_argument("port_range", help="Intervallo di porte (es. 1-1024)")
     parser.add_argument("-t", "--threads", type=int, default=10, help="Numero di thread (predefinito: 10)")
@@ -139,7 +137,7 @@ if __name__ == "__main__":
         if port_start < 1 or port_end > 65535 or port_start > port_end:
             raise ValueError
     except ValueError:
-        print("Errore: intervallo porte non valido. Usa il formato '1-65535'.")
-        exit(1)
+        print("[ERRORE] Formato dell'intervallo porte non valido. Usa il formato '1-65535'.")
+        sys.exit(1)
 
     main((port_start, port_end), args.threads)
