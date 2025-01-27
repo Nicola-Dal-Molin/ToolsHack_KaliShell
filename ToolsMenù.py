@@ -71,7 +71,6 @@ def main():
     while True:
         print_menu()  # Mostra il menu
         choice = input("Seleziona un'opzione: ")
-        
         if choice == "1":
             load_script("ARPSpoofV2")
         elif choice == "2":

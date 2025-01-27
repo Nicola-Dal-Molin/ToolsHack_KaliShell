@@ -5,6 +5,7 @@ import socket
 import subprocess
 import re
 import sys
+import signal
 
 # Controllo permessi di root
 def check_root():
@@ -73,11 +74,42 @@ def scan_ports(host, port_queue, open_ports):
         finally:
             port_queue.task_done()
 
-# Funzione principale
-def main(port_range, num_threads):
+# Funzione per ottenere gli input dell'utente
+def get_user_inputs():
+    """Chiede all'utente di inserire l'intervallo delle porte e il numero di thread."""
+    print("[+] Strumento di scansione di rete e porte")
+
+    port_range = input("Inserisci l'intervallo delle porte (es. 1-1024): ").strip()
+    try:
+        port_start, port_end = map(int, port_range.split("-"))
+        if port_start < 1 or port_end > 65535 or port_start > port_end:
+            raise ValueError
+    except ValueError:
+        print("[ERRORE] Formato dell'intervallo porte non valido. Usa il formato '1-65535'.")
+        sys.exit(1)
+
+    threads = int(input("Inserisci il numero di thread da utilizzare (predefinito: 10): ").strip())
+    if threads < 1:
+        threads = 10  # Valore di default
+
+    return (port_start, port_end), threads
+
+# Funzione per gestire l'interruzione tramite Ctrl+C
+def handle_interruption(signum, frame):
+    print("\n[INFO] Esecuzione interrotta. Uscita in corso...")
+    sys.exit(0)
+
+# Funzione principale per l'esecuzione
+def run():
+    # Impostiamo il gestore per l'interruzione (Ctrl+C)
+    signal.signal(signal.SIGINT, handle_interruption)
+
     # Controlla i permessi di root
     check_root()
-    
+
+    # Ottieni l'intervallo delle porte e il numero di thread
+    port_range, num_threads = get_user_inputs()
+
     # Ottieni la rete attiva
     ip_range = get_network()
     if not ip_range:
@@ -123,21 +155,4 @@ def main(port_range, num_threads):
             print(f"[-] Nessuna porta aperta rilevata su {host['ip']}.")
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Scansione di rete e porte.")
-    parser.add_argument("port_range", help="Intervallo di porte (es. 1-1024)")
-    parser.add_argument("-t", "--threads", type=int, default=10, help="Numero di thread (predefinito: 10)")
-
-    args = parser.parse_args()
-
-    # Parsing intervallo porte
-    try:
-        port_start, port_end = map(int, args.port_range.split("-"))
-        if port_start < 1 or port_end > 65535 or port_start > port_end:
-            raise ValueError
-    except ValueError:
-        print("[ERRORE] Formato dell'intervallo porte non valido. Usa il formato '1-65535'.")
-        sys.exit(1)
-
-    main((port_start, port_end), args.threads)
+    run()
